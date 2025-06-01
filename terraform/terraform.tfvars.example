@@ -1,0 +1,32 @@
+# Example Terraform variables file
+# Copy this file to terraform.tfvars and customize for your environment
+
+# AWS Configuration
+aws_region = "us-east-1"
+
+# Environment Configuration
+environment  = "dev"
+project_name = "parts-service"
+owner        = "parts-team"
+
+# DynamoDB Table Configuration
+dynamodb_table_name = "unt-part-svc"
+primary_key_name    = "PK"
+sort_key_name       = "SK"
+
+# Billing and Performance
+billing_mode = "PAY_PER_REQUEST"
+
+# Streams Configuration
+stream_enabled   = true
+stream_view_type = "NEW_AND_OLD_IMAGES"
+
+# Data Protection
+deletion_protection_enabled      = false
+point_in_time_recovery_enabled   = true
+
+# Example for production environment:
+# environment = "prod"
+# aws_region = "us-west-2"
+# deletion_protection_enabled = true
+# billing_mode = "PROVISIONED"
