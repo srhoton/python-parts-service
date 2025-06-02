@@ -16,8 +16,9 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Initialize DynamoDB client
+# Initialize AWS clients
 dynamodb = boto3.resource("dynamodb")
+secrets_client = boto3.client("secretsmanager")
 
 
 class PartValidationError(Exception):
@@ -33,8 +34,36 @@ class PartNotFoundError(Exception):
 
 
 def get_table_name() -> str:
-    """Get the DynamoDB table name from environment variable."""
-    return os.environ.get("DYNAMODB_TABLE_NAME", "unt-part-svc")
+    """Get the DynamoDB table name from Secrets Manager or environment variables."""
+    secret_name = os.environ.get("SECRET_NAME")
+    fallback_table_name = os.environ.get("DYNAMODB_TABLE_NAME")
+    
+    if not secret_name:
+        # Use environment variable if no secret is configured
+        if not fallback_table_name:
+            raise ValueError("Neither SECRET_NAME nor DYNAMODB_TABLE_NAME environment variables are set")
+        return fallback_table_name
+    
+    try:
+        response = secrets_client.get_secret_value(SecretId=secret_name)
+        secrets = json.loads(response["SecretString"])
+        table_name = secrets.get("DYNAMODB_TABLE_NAME")
+        
+        if not table_name:
+            if fallback_table_name:
+                logger.warning(f"DYNAMODB_TABLE_NAME not found in secret {secret_name}, using environment variable")
+                return fallback_table_name
+            else:
+                raise ValueError(f"DYNAMODB_TABLE_NAME not found in secret {secret_name} and no fallback environment variable set")
+        
+        return table_name
+    except ClientError as e:
+        logger.error(f"Error retrieving secret {secret_name}: {e}")
+        if fallback_table_name:
+            logger.warning("Falling back to environment variable for table name")
+            return fallback_table_name
+        else:
+            raise ValueError(f"Failed to retrieve secret {secret_name} and no fallback environment variable set") from e
 
 
 def get_current_timestamp() -> str:
