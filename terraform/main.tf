@@ -159,7 +159,8 @@ resource "aws_lambda_function" "parts_service_lambda" {
 
   environment {
     variables = {
-      SECRET_NAME = aws_secretsmanager_secret.parts_service_config.name
+      SECRET_NAME         = aws_secretsmanager_secret.parts_service_config.name
+      DYNAMODB_TABLE_NAME = aws_dynamodb_table.parts_table.name
     }
   }
 
