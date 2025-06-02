@@ -16,8 +16,9 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Initialize DynamoDB client
+# Initialize AWS clients
 dynamodb = boto3.resource("dynamodb")
+secrets_client = boto3.client("secretsmanager")
 
 
 class PartValidationError(Exception):
@@ -33,8 +34,20 @@ class PartNotFoundError(Exception):
 
 
 def get_table_name() -> str:
-    """Get the DynamoDB table name from environment variable."""
-    return os.environ.get("DYNAMODB_TABLE_NAME", "unt-part-svc")
+    """Get the DynamoDB table name from Secrets Manager."""
+    secret_name = os.environ.get("SECRET_NAME")
+    if not secret_name:
+        # Fallback to environment variable for backward compatibility
+        return os.environ.get("DYNAMODB_TABLE_NAME", "unt-part-svc")
+    
+    try:
+        response = secrets_client.get_secret_value(SecretId=secret_name)
+        secrets = json.loads(response["SecretString"])
+        return secrets.get("DYNAMODB_TABLE_NAME", "unt-part-svc")
+    except ClientError as e:
+        logger.error(f"Error retrieving secret {secret_name}: {e}")
+        # Fallback to environment variable
+        return os.environ.get("DYNAMODB_TABLE_NAME", "unt-part-svc")
 
 
 def get_current_timestamp() -> str:

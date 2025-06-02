@@ -96,3 +96,95 @@ variable "point_in_time_recovery_enabled" {
   type        = bool
   default     = true
 }
+
+# Lambda function configuration variables
+
+variable "lambda_function_name" {
+  description = "Name of the Lambda function"
+  type        = string
+  default     = "parts-service-lambda"
+
+  validation {
+    condition     = length(var.lambda_function_name) >= 1 && length(var.lambda_function_name) <= 64
+    error_message = "Lambda function name must be between 1 and 64 characters."
+  }
+}
+
+variable "lambda_runtime" {
+  description = "Runtime for the Lambda function"
+  type        = string
+  default     = "python3.12"
+
+  validation {
+    condition     = contains(["python3.9", "python3.10", "python3.11", "python3.12"], var.lambda_runtime)
+    error_message = "Lambda runtime must be a supported Python version."
+  }
+}
+
+variable "lambda_timeout" {
+  description = "Timeout for the Lambda function in seconds"
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.lambda_timeout >= 1 && var.lambda_timeout <= 900
+    error_message = "Lambda timeout must be between 1 and 900 seconds."
+  }
+}
+
+variable "lambda_memory_size" {
+  description = "Memory size for the Lambda function in MB"
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.lambda_memory_size >= 128 && var.lambda_memory_size <= 10240
+    error_message = "Lambda memory size must be between 128 and 10240 MB."
+  }
+}
+
+variable "lambda_handler" {
+  description = "Handler for the Lambda function"
+  type        = string
+  default     = "parts_service.lambda_handler.lambda_handler"
+}
+
+# API Gateway configuration variables
+
+variable "api_gateway_name" {
+  description = "Name of the API Gateway"
+  type        = string
+  default     = "parts-service-api"
+}
+
+variable "api_gateway_description" {
+  description = "Description of the API Gateway"
+  type        = string
+  default     = "HTTP API Gateway for Parts Service"
+}
+
+variable "api_gateway_stage_name" {
+  description = "Name of the API Gateway stage"
+  type        = string
+  default     = "v1"
+}
+
+variable "api_gateway_auto_deploy" {
+  description = "Whether to automatically deploy the API Gateway stage"
+  type        = bool
+  default     = true
+}
+
+# Secrets Manager configuration variables
+
+variable "secrets_manager_secret_name" {
+  description = "Name of the Secrets Manager secret"
+  type        = string
+  default     = "parts-service-config"
+}
+
+variable "secrets_manager_description" {
+  description = "Description of the Secrets Manager secret"
+  type        = string
+  default     = "Configuration secrets for Parts Service"
+}

@@ -25,8 +25,28 @@ stream_view_type = "NEW_AND_OLD_IMAGES"
 deletion_protection_enabled      = false
 point_in_time_recovery_enabled   = true
 
+# Lambda Configuration
+lambda_function_name = "parts-service-lambda"
+lambda_runtime       = "python3.12"
+lambda_timeout       = 30
+lambda_memory_size   = 512
+lambda_handler       = "parts_service.lambda_handler.lambda_handler"
+
+# API Gateway Configuration
+api_gateway_name        = "parts-service-api"
+api_gateway_description = "HTTP API Gateway for Parts Service"
+api_gateway_stage_name  = "v1"
+api_gateway_auto_deploy = true
+
+# Secrets Manager Configuration
+secrets_manager_secret_name = "parts-service-config"
+secrets_manager_description = "Configuration secrets for Parts Service"
+
 # Example for production environment:
 # environment = "prod"
 # aws_region = "us-west-2"
 # deletion_protection_enabled = true
 # billing_mode = "PROVISIONED"
+# lambda_function_name = "parts-service-lambda-prod"
+# api_gateway_name = "parts-service-api-prod"
+# secrets_manager_secret_name = "parts-service-config-prod"
