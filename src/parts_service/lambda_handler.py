@@ -6,9 +6,10 @@ import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Union, Type
+from typing import Any, Dict, List, Optional, Type, Union
 
 import boto3
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 # Configure logging
@@ -137,9 +138,8 @@ def get_part_by_uuid(table: Any, part_uuid: str) -> Optional[Dict[str, Any]]:
     """Get a part by UUID if it exists and is not deleted."""
     try:
         response = table.query(
-            KeyConditionExpression="PK = :pk",
-            ExpressionAttributeValues={":pk": part_uuid},
-            FilterExpression="attribute_not_exists(deletedAt)",
+            KeyConditionExpression=Key("PK").eq(part_uuid),
+            FilterExpression=Attr("deletedAt").not_exists()
         )
 
         items = response.get("Items", [])
@@ -372,7 +372,7 @@ def delete_part(event: Dict[str, Any]) -> Dict[str, Any]:
         table.update_item(
             Key={"PK": part_uuid, "SK": existing_part["SK"]},
             UpdateExpression="SET deletedAt = :deleted_at",
-            ExpressionAttributeValues={":deleted_at": get_current_timestamp()},
+            ExpressionAttributeValues={":deleted_at": get_current_timestamp()}
         )
 
         logger.info(f"Deleted part with UUID: {part_uuid}")
