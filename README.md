@@ -1,6 +1,6 @@
 # Python Parts Service
 
-A Python 3.13 AWS Lambda service for managing parts inventory with full CRUD operations via API Gateway v2.
+A Python 3.13 AWS Lambda service for managing parts inventory with full CRUD operations via API Gateway v2 and AWS AppSync.
 
 ## Overview
 
@@ -11,10 +11,10 @@ This service provides a RESTful API for managing parts in a DynamoDB table. It s
 - **Full CRUD Operations**: Create, Read, Update, and Delete parts
 - **Soft Delete**: Parts are marked as deleted rather than permanently removed
 - **Data Validation**: Comprehensive validation for required fields and data types
-- **AWS Lambda**: Serverless deployment with API Gateway v2 integration
+- **AWS Lambda**: Serverless deployment with API Gateway v2 and AppSync integration
 - **DynamoDB**: NoSQL storage with configurable table name
 - **Type Safety**: Full type annotations with MyPy validation
-- **Comprehensive Testing**: 60%+ test coverage with pytest
+- **Comprehensive Testing**: 80%+ test coverage with pytest
 - **Code Quality**: Ruff linting and formatting
 
 ## Project Structure
@@ -80,7 +80,14 @@ The `additionalFields` array contains objects with the following structure:
 }
 ```
 
-### Endpoints
+### Event Sources
+
+This service supports two event sources:
+
+1. **API Gateway v2 (HTTP API)** - REST API endpoints
+2. **AWS AppSync** - GraphQL operations
+
+### API Gateway v2 Endpoints
 
 #### GET /parts/{uuid}
 Retrieve a specific part by UUID.
@@ -185,6 +192,124 @@ Soft delete a part.
 ```json
 {
   "message": "Part deleted successfully"
+}
+```
+
+### AWS AppSync Operations
+
+The service also supports GraphQL operations through AWS AppSync:
+
+#### Query: getPart
+Retrieve a specific part by UUID.
+
+**GraphQL Query**:
+```graphql
+query GetPart($uuid: String!) {
+  getPart(uuid: $uuid) {
+    PK
+    SK
+    accountId
+    category
+    segment
+    partTerminologyName
+    createdAt
+    additionalFields {
+      fieldName
+      codedValue
+      referenceFieldNumber
+    }
+  }
+}
+```
+
+**Variables**:
+```json
+{
+  "uuid": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+#### Mutation: createPart
+Create a new part.
+
+**GraphQL Mutation**:
+```graphql
+mutation CreatePart($part: PartInput!) {
+  createPart(part: $part) {
+    uuid
+    message
+    part {
+      PK
+      SK
+      accountId
+      category
+      segment
+      partTerminologyName
+      createdAt
+    }
+  }
+}
+```
+
+**Variables**:
+```json
+{
+  "part": {
+    "accountId": "acc123",
+    "category": "Electronics",
+    "segment": "Consumer",
+    "partTerminologyName": "Resistor"
+  }
+}
+```
+
+#### Mutation: updatePart
+Update an existing part.
+
+**GraphQL Mutation**:
+```graphql
+mutation UpdatePart($uuid: String!, $part: PartUpdateInput!) {
+  updatePart(uuid: $uuid, part: $part) {
+    message
+    part {
+      PK
+      SK
+      category
+      segment
+      updatedAt
+    }
+  }
+}
+```
+
+**Variables**:
+```json
+{
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "part": {
+    "category": "Updated Electronics",
+    "segment": "Industrial"
+  }
+}
+```
+
+#### Mutation: deletePart
+Soft delete a part.
+
+**GraphQL Mutation**:
+```graphql
+mutation DeletePart($uuid: String!) {
+  deletePart(uuid: $uuid) {
+    message
+    success
+  }
+}
+```
+
+**Variables**:
+```json
+{
+  "uuid": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
@@ -313,6 +438,102 @@ Configure API Gateway v2 to route requests to the Lambda function:
 - **PUT** `/parts/{uuid}` → Lambda with `uuid` path parameter and request body
 - **DELETE** `/parts/{uuid}` → Lambda with `uuid` path parameter
 
+## AppSync Integration
+
+Configure AWS AppSync to use the same Lambda function as a data source:
+
+1. **Create AppSync Data Source**: Link to the Lambda function
+2. **Configure Resolvers**: Map GraphQL operations to Lambda invocations
+3. **Schema Definition**: Define GraphQL schema with Part types and operations
+
+### Example AppSync Schema
+
+```graphql
+type Part {
+  PK: String!
+  SK: String!
+  accountId: String!
+  category: String!
+  segment: String!
+  partTerminologyName: String!
+  customerId: String
+  locationId: String
+  categoryProductId: Float
+  categoryId: Float
+  segmentId: Float
+  partTerminologyId: Float
+  additionalFields: [AdditionalField]
+  createdAt: String!
+  updatedAt: String
+  deletedAt: String
+}
+
+type AdditionalField {
+  referenceFieldNumber: Float
+  fieldName: String!
+  codedValue: String!
+}
+
+input PartInput {
+  accountId: String!
+  category: String!
+  segment: String!
+  partTerminologyName: String!
+  customerId: String
+  locationId: String
+  categoryProductId: Float
+  categoryId: Float
+  segmentId: Float
+  partTerminologyId: Float
+  additionalFields: [AdditionalFieldInput]
+}
+
+input PartUpdateInput {
+  category: String
+  segment: String
+  partTerminologyName: String
+  customerId: String
+  locationId: String
+  categoryProductId: Float
+  categoryId: Float
+  segmentId: Float
+  partTerminologyId: Float
+  additionalFields: [AdditionalFieldInput]
+}
+
+input AdditionalFieldInput {
+  referenceFieldNumber: Float
+  fieldName: String!
+  codedValue: String!
+}
+
+type CreatePartResponse {
+  uuid: String
+  message: String
+  part: Part
+}
+
+type UpdatePartResponse {
+  message: String
+  part: Part
+}
+
+type DeletePartResponse {
+  message: String
+  success: Boolean
+}
+
+type Query {
+  getPart(uuid: String!): Part
+}
+
+type Mutation {
+  createPart(part: PartInput!): CreatePartResponse
+  updatePart(uuid: String!, part: PartUpdateInput!): UpdatePartResponse
+  deletePart(uuid: String!): DeletePartResponse
+}
+```
+
 ## Error Handling
 
 The service returns standard HTTP status codes:
@@ -352,7 +573,7 @@ This project enforces:
 
 - **Ruff**: Fast Python linter and formatter
 - **MyPy**: Static type checking
-- **Pytest**: Testing framework with 60%+ coverage requirement
+- **Pytest**: Testing framework with 80%+ coverage requirement
 - **Bandit**: Security vulnerability scanning
 - **Python 3.13**: Latest Python version support
 
@@ -386,6 +607,14 @@ For questions or issues:
 4. Include logs, error messages, and steps to reproduce
 
 ## Changelog
+
+### v0.2.0
+- Added AWS AppSync event support alongside API Gateway v2
+- Enhanced Lambda handler to automatically detect event source
+- Added comprehensive AppSync GraphQL operation support
+- Maintained 80%+ test coverage with new functionality
+- Full type safety with MyPy
+- All code quality checks passing
 
 ### v0.1.0
 - Initial implementation of Parts Service Lambda

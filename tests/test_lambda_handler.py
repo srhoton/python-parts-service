@@ -13,10 +13,13 @@ from src.parts_service.lambda_handler import (
     PartValidationError,
     create_part,
     delete_part,
+    format_appsync_response,
     get_current_timestamp,
     get_part,
     get_table_name,
+    is_appsync_event,
     lambda_handler,
+    parse_appsync_event,
     update_part,
     validate_additional_fields,
     validate_part_data,
@@ -159,19 +162,383 @@ class TestUtilityFunctions:
         assert parsed.tzinfo is not None
 
     @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "custom-table"})
-    def test_get_table_name_from_env(self):
-        """Test getting table name from environment variable."""
+    def test_get_table_name_custom_env(self):
+        """Test getting table name from custom environment variable."""
         assert get_table_name() == "custom-table"
 
-    @patch.dict("os.environ", {}, clear=True)
-    def test_get_table_name_default(self):
-        """Test getting default table name."""
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"}, clear=True)
+    def test_get_table_name_from_env(self):
+        """Test getting table name from environment variable."""
         assert get_table_name() == "unt-part-svc"
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_get_table_name_no_env_vars(self):
+        """Test error when no environment variables are set."""
+        with pytest.raises(
+            ValueError,
+            match="Neither SECRET_NAME nor DYNAMODB_TABLE_NAME environment "
+            "variables are set",
+        ):
+            get_table_name()
+
+
+class TestAppSyncEventHandling:
+    """Test AppSync event detection and parsing."""
+
+    def test_is_appsync_event_true(self):
+        """Test detection of valid AppSync event."""
+        appsync_event = {
+            "info": {"fieldName": "getPart", "parentTypeName": "Query"},
+            "arguments": {},
+        }
+        assert is_appsync_event(appsync_event) is True
+
+    def test_is_appsync_event_false_api_gateway(self):
+        """Test detection of API Gateway event as non-AppSync."""
+        api_gateway_event = {
+            "httpMethod": "GET",
+            "pathParameters": {"uuid": "test-uuid"},
+        }
+        assert is_appsync_event(api_gateway_event) is False
+
+    def test_is_appsync_event_false_missing_info(self):
+        """Test detection fails when info is missing."""
+        incomplete_event = {"arguments": {}}
+        assert is_appsync_event(incomplete_event) is False
+
+    def test_parse_appsync_event_get_part(self):
+        """Test parsing AppSync getPart operation."""
+        appsync_event = {
+            "info": {
+                "fieldName": "getPart",
+                "parentTypeName": "Query",
+                "requestId": "test-request-123",
+            },
+            "arguments": {"uuid": "test-uuid-123"},
+        }
+
+        operation_type, parsed_data = parse_appsync_event(appsync_event)
+
+        assert operation_type == "GET"
+        assert parsed_data["httpMethod"] == "GET"
+        assert parsed_data["pathParameters"]["uuid"] == "test-uuid-123"
+        assert parsed_data["requestContext"]["appsync"] is True
+
+    def test_parse_appsync_event_create_part(self):
+        """Test parsing AppSync createPart operation."""
+        part_data = {
+            "accountId": "acc123",
+            "category": "Electronics",
+            "segment": "Consumer",
+            "partTerminologyName": "Resistor",
+        }
+
+        appsync_event = {
+            "info": {"fieldName": "createPart", "parentTypeName": "Mutation"},
+            "arguments": {"part": part_data},
+        }
+
+        operation_type, parsed_data = parse_appsync_event(appsync_event)
+
+        assert operation_type == "POST"
+        assert parsed_data["httpMethod"] == "POST"
+        body = json.loads(parsed_data["body"])
+        assert body["part"] == part_data
+
+    def test_parse_appsync_event_update_part(self):
+        """Test parsing AppSync updatePart operation."""
+        update_data = {"category": "Updated Electronics"}
+
+        appsync_event = {
+            "info": {"fieldName": "updatePart", "parentTypeName": "Mutation"},
+            "arguments": {"uuid": "test-uuid-456", "part": update_data},
+        }
+
+        operation_type, parsed_data = parse_appsync_event(appsync_event)
+
+        assert operation_type == "PUT"
+        assert parsed_data["httpMethod"] == "PUT"
+        assert parsed_data["pathParameters"]["uuid"] == "test-uuid-456"
+        body = json.loads(parsed_data["body"])
+        assert body["part"] == update_data
+
+    def test_parse_appsync_event_delete_part(self):
+        """Test parsing AppSync deletePart operation."""
+        appsync_event = {
+            "info": {"fieldName": "deletePart", "parentTypeName": "Mutation"},
+            "arguments": {"uuid": "test-uuid-789"},
+        }
+
+        operation_type, parsed_data = parse_appsync_event(appsync_event)
+
+        assert operation_type == "DELETE"
+        assert parsed_data["httpMethod"] == "DELETE"
+        assert parsed_data["pathParameters"]["uuid"] == "test-uuid-789"
+
+    def test_parse_appsync_event_unsupported_operation(self):
+        """Test parsing unsupported AppSync operation raises error."""
+        appsync_event = {
+            "info": {"fieldName": "unsupportedOperation", "parentTypeName": "Query"},
+            "arguments": {},
+        }
+
+        with pytest.raises(
+            ValueError, match="Unsupported AppSync operation: unsupportedOperation"
+        ):
+            parse_appsync_event(appsync_event)
+
+    def test_parse_appsync_event_alternative_argument_names(self):
+        """Test parsing with alternative argument names (id, input)."""
+        appsync_event = {
+            "info": {"fieldName": "getPart", "parentTypeName": "Query"},
+            "arguments": {"id": "test-uuid-alt"},
+        }
+
+        operation_type, parsed_data = parse_appsync_event(appsync_event)
+
+        assert operation_type == "GET"
+        assert parsed_data["pathParameters"]["uuid"] == "test-uuid-alt"
+
+    def test_format_appsync_response_get_success(self):
+        """Test formatting successful GET response for AppSync."""
+        http_response = {
+            "statusCode": 200,
+            "body": json.dumps(
+                {"part": {"PK": "test-uuid", "category": "Electronics"}}
+            ),
+        }
+
+        result = format_appsync_response(http_response, "GET")
+
+        assert result == {"PK": "test-uuid", "category": "Electronics"}
+
+    def test_format_appsync_response_post_success(self):
+        """Test formatting successful POST response for AppSync."""
+        http_response = {
+            "statusCode": 201,
+            "body": json.dumps(
+                {
+                    "message": "Part created successfully",
+                    "uuid": "new-uuid",
+                    "part": {"PK": "new-uuid", "category": "Electronics"},
+                }
+            ),
+        }
+
+        result = format_appsync_response(http_response, "POST")
+
+        assert result["uuid"] == "new-uuid"
+        assert result["message"] == "Part created successfully"
+        assert result["part"]["PK"] == "new-uuid"
+
+    def test_format_appsync_response_put_success(self):
+        """Test formatting successful PUT response for AppSync."""
+        http_response = {
+            "statusCode": 200,
+            "body": json.dumps(
+                {
+                    "message": "Part updated successfully",
+                    "part": {"PK": "updated-uuid", "category": "Updated"},
+                }
+            ),
+        }
+
+        result = format_appsync_response(http_response, "PUT")
+
+        assert result["message"] == "Part updated successfully"
+        assert result["part"]["category"] == "Updated"
+
+    def test_format_appsync_response_delete_success(self):
+        """Test formatting successful DELETE response for AppSync."""
+        http_response = {
+            "statusCode": 200,
+            "body": json.dumps({"message": "Part deleted successfully"}),
+        }
+
+        result = format_appsync_response(http_response, "DELETE")
+
+        assert result["message"] == "Part deleted successfully"
+        assert result["success"] is True
+
+    def test_format_appsync_response_error(self):
+        """Test formatting error response for AppSync."""
+        http_response = {
+            "statusCode": 404,
+            "body": json.dumps({"error": "Part not found"}),
+        }
+
+        result = format_appsync_response(http_response, "GET")
+
+        assert result["error"]["message"] == "Part not found"
+        assert result["error"]["statusCode"] == 404
+
+    def test_format_appsync_response_invalid_json(self):
+        """Test formatting response with invalid JSON body."""
+        http_response = {"statusCode": 200, "body": "invalid json"}
+
+        result = format_appsync_response(http_response, "GET")
+
+        assert result["error"]["message"] == "Invalid response format"
+
+
+class TestAppSyncLambdaIntegration:
+    """Test AppSync integration with lambda handler."""
+
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
+    def test_lambda_handler_appsync_get_part(self, dynamodb_table, sample_part_data):
+        """Test lambda handler with AppSync getPart request."""
+        # Create a part first
+        part_uuid = str(uuid.uuid4())
+        item = {
+            "PK": part_uuid,
+            "SK": sample_part_data["accountId"],
+            "createdAt": get_current_timestamp(),
+            **sample_part_data,
+        }
+        dynamodb_table.put_item(Item=item)
+
+        appsync_event = {
+            "info": {
+                "fieldName": "getPart",
+                "parentTypeName": "Query",
+                "requestId": "appsync-test-123",
+            },
+            "arguments": {"uuid": part_uuid},
+        }
+
+        with patch("src.parts_service.lambda_handler.dynamodb") as mock_dynamodb:
+            mock_dynamodb.Table.return_value = dynamodb_table
+
+            result = lambda_handler(appsync_event, {})
+
+            assert "PK" in result
+            assert result["PK"] == part_uuid
+            assert result["category"] == "Electronics"
+
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
+    def test_lambda_handler_appsync_create_part(self, dynamodb_table, sample_part_data):
+        """Test lambda handler with AppSync createPart request."""
+        appsync_event = {
+            "info": {"fieldName": "createPart", "parentTypeName": "Mutation"},
+            "arguments": {"part": sample_part_data},
+        }
+
+        with patch("src.parts_service.lambda_handler.dynamodb") as mock_dynamodb:
+            mock_dynamodb.Table.return_value = dynamodb_table
+
+            result = lambda_handler(appsync_event, {})
+
+            assert "uuid" in result
+            assert result["message"] == "Part created successfully"
+            assert result["part"]["category"] == "Electronics"
+
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
+    def test_lambda_handler_appsync_update_part(self, dynamodb_table, sample_part_data):
+        """Test lambda handler with AppSync updatePart request."""
+        # Create a part first
+        part_uuid = str(uuid.uuid4())
+        item = {
+            "PK": part_uuid,
+            "SK": sample_part_data["accountId"],
+            "createdAt": get_current_timestamp(),
+            **sample_part_data,
+        }
+        dynamodb_table.put_item(Item=item)
+
+        appsync_event = {
+            "info": {"fieldName": "updatePart", "parentTypeName": "Mutation"},
+            "arguments": {
+                "uuid": part_uuid,
+                "part": {"category": "Updated Electronics"},
+            },
+        }
+
+        with patch("src.parts_service.lambda_handler.dynamodb") as mock_dynamodb:
+            mock_dynamodb.Table.return_value = dynamodb_table
+
+            result = lambda_handler(appsync_event, {})
+
+            assert result["message"] == "Part updated successfully"
+            assert result["part"]["category"] == "Updated Electronics"
+
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
+    def test_lambda_handler_appsync_delete_part(self, dynamodb_table, sample_part_data):
+        """Test lambda handler with AppSync deletePart request."""
+        # Create a part first
+        part_uuid = str(uuid.uuid4())
+        item = {
+            "PK": part_uuid,
+            "SK": sample_part_data["accountId"],
+            "createdAt": get_current_timestamp(),
+            **sample_part_data,
+        }
+        dynamodb_table.put_item(Item=item)
+
+        appsync_event = {
+            "info": {"fieldName": "deletePart", "parentTypeName": "Mutation"},
+            "arguments": {"uuid": part_uuid},
+        }
+
+        with patch("src.parts_service.lambda_handler.dynamodb") as mock_dynamodb:
+            mock_dynamodb.Table.return_value = dynamodb_table
+
+            result = lambda_handler(appsync_event, {})
+
+            assert result["message"] == "Part deleted successfully"
+            assert result["success"] is True
+
+    def test_lambda_handler_appsync_unsupported_operation(self):
+        """Test lambda handler with unsupported AppSync operation."""
+        appsync_event = {
+            "info": {"fieldName": "unsupportedOperation", "parentTypeName": "Query"},
+            "arguments": {},
+        }
+
+        result = lambda_handler(appsync_event, {})
+
+        assert "error" in result
+        assert "Unsupported AppSync operation" in result["error"]["message"]
+        assert result["error"]["statusCode"] == 400
+
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
+    def test_lambda_handler_appsync_part_not_found(self, dynamodb_table):
+        """Test lambda handler AppSync request for non-existent part."""
+        appsync_event = {
+            "info": {"fieldName": "getPart", "parentTypeName": "Query"},
+            "arguments": {"uuid": str(uuid.uuid4())},
+        }
+
+        with patch("src.parts_service.lambda_handler.dynamodb") as mock_dynamodb:
+            mock_dynamodb.Table.return_value = dynamodb_table
+
+            result = lambda_handler(appsync_event, {})
+
+            assert "error" in result
+            assert result["error"]["message"] == "Part not found"
+            assert result["error"]["statusCode"] == 404
+
+    def test_lambda_handler_appsync_unexpected_error(self):
+        """Test lambda handler handles unexpected AppSync errors."""
+        appsync_event = {
+            "info": {"fieldName": "getPart", "parentTypeName": "Query"},
+            "arguments": {"uuid": "test-uuid"},
+        }
+
+        with patch(
+            "src.parts_service.lambda_handler.get_part",
+            side_effect=Exception("Unexpected error"),
+        ):
+            result = lambda_handler(appsync_event, {})
+
+            assert "error" in result
+            assert result["error"]["message"] == "Internal server error"
+            assert result["error"]["statusCode"] == 500
 
 
 class TestCreatePart:
     """Test create part functionality."""
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_create_part_success(
         self, dynamodb_table, sample_part_data, sample_lambda_event
     ):
@@ -230,6 +597,7 @@ class TestCreatePart:
 class TestGetPart:
     """Test get part functionality."""
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_get_part_success(self, dynamodb_table, sample_part_data):
         """Test successful part retrieval."""
         # First create a part
@@ -253,6 +621,7 @@ class TestGetPart:
             body = json.loads(result["body"])
             assert body["part"]["PK"] == part_uuid
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_get_part_not_found(self, dynamodb_table):
         """Test get part when part doesn't exist."""
         event = {"pathParameters": {"uuid": str(uuid.uuid4())}}
@@ -276,6 +645,7 @@ class TestGetPart:
         body = json.loads(result["body"])
         assert "Missing UUID" in body["error"]
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_get_part_deleted(self, dynamodb_table, sample_part_data):
         """Test get part fails when part is deleted."""
         # Create a deleted part
@@ -302,6 +672,7 @@ class TestGetPart:
 class TestUpdatePart:
     """Test update part functionality."""
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_update_part_success(self, dynamodb_table, sample_part_data):
         """Test successful part update."""
         # First create a part
@@ -331,6 +702,7 @@ class TestUpdatePart:
             assert body["message"] == "Part updated successfully"
             assert body["part"]["category"] == "Updated Category"
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_update_part_not_found(self, dynamodb_table):
         """Test update part when part doesn't exist."""
         event = {
@@ -377,6 +749,7 @@ class TestUpdatePart:
 class TestDeletePart:
     """Test delete part functionality."""
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_delete_part_success(self, dynamodb_table, sample_part_data):
         """Test successful part deletion (soft delete)."""
         # First create a part
@@ -406,6 +779,7 @@ class TestDeletePart:
             )
             assert "deletedAt" in response["Item"]
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_delete_part_not_found(self, dynamodb_table):
         """Test delete part when part doesn't exist."""
         event = {"pathParameters": {"uuid": str(uuid.uuid4())}}
@@ -433,6 +807,7 @@ class TestDeletePart:
 class TestLambdaHandler:
     """Test main lambda handler function."""
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_lambda_handler_get_method(self, dynamodb_table, sample_part_data):
         """Test lambda handler with GET method."""
         # Create a part first
@@ -454,6 +829,7 @@ class TestLambdaHandler:
 
             assert result["statusCode"] == 200
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_lambda_handler_post_method(self, dynamodb_table, sample_part_data):
         """Test lambda handler with POST method."""
         event = {"httpMethod": "POST", "body": json.dumps({"part": sample_part_data})}
@@ -465,6 +841,7 @@ class TestLambdaHandler:
 
             assert result["statusCode"] == 201
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_lambda_handler_put_method(self, dynamodb_table, sample_part_data):
         """Test lambda handler with PUT method."""
         # Create a part first
@@ -490,6 +867,7 @@ class TestLambdaHandler:
 
             assert result["statusCode"] == 200
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_lambda_handler_delete_method(self, dynamodb_table, sample_part_data):
         """Test lambda handler with DELETE method."""
         # Create a part first
@@ -511,6 +889,7 @@ class TestLambdaHandler:
 
             assert result["statusCode"] == 200
 
+    @patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "unt-part-svc"})
     def test_lambda_handler_api_gateway_v2_format(
         self, dynamodb_table, sample_part_data
     ):
