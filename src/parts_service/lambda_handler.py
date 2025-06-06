@@ -6,7 +6,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
@@ -37,38 +37,181 @@ def get_table_name() -> str:
     """Get the DynamoDB table name from Secrets Manager or environment variables."""
     secret_name = os.environ.get("SECRET_NAME")
     fallback_table_name = os.environ.get("DYNAMODB_TABLE_NAME")
-    
+
     if not secret_name:
         # Use environment variable if no secret is configured
         if not fallback_table_name:
-            raise ValueError("Neither SECRET_NAME nor DYNAMODB_TABLE_NAME environment variables are set")
-        return fallback_table_name
-    
+            raise ValueError(
+                "Neither SECRET_NAME nor DYNAMODB_TABLE_NAME environment "
+                "variables are set"
+            )
+        return str(fallback_table_name)
+
     try:
         response = secrets_client.get_secret_value(SecretId=secret_name)
         secrets = json.loads(response["SecretString"])
         table_name = secrets.get("DYNAMODB_TABLE_NAME")
-        
+
         if not table_name:
             if fallback_table_name:
-                logger.warning(f"DYNAMODB_TABLE_NAME not found in secret {secret_name}, using environment variable")
+                logger.warning(
+                    f"DYNAMODB_TABLE_NAME not found in secret {secret_name}, "
+                    "using environment variable"
+                )
                 return fallback_table_name
             else:
-                raise ValueError(f"DYNAMODB_TABLE_NAME not found in secret {secret_name} and no fallback environment variable set")
-        
-        return table_name
+                raise ValueError(
+                    f"DYNAMODB_TABLE_NAME not found in secret {secret_name} "
+                    "and no fallback environment variable set"
+                )
+
+        return str(table_name)
     except ClientError as e:
         logger.error(f"Error retrieving secret {secret_name}: {e}")
         if fallback_table_name:
             logger.warning("Falling back to environment variable for table name")
             return fallback_table_name
         else:
-            raise ValueError(f"Failed to retrieve secret {secret_name} and no fallback environment variable set") from e
+            raise ValueError(
+                f"Failed to retrieve secret {secret_name} "
+                "and no fallback environment variable set"
+            ) from e
 
 
 def get_current_timestamp() -> str:
     """Get current ISO timestamp."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def is_appsync_event(event: Dict[str, Any]) -> bool:
+    """Check if the event is from AWS AppSync."""
+    return (
+        "info" in event
+        and "fieldName" in event.get("info", {})
+        and "parentTypeName" in event.get("info", {})
+    )
+
+
+def parse_appsync_event(event: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Parse AppSync event and extract operation type and data.
+
+    Args:
+        event: AppSync event containing info and arguments
+
+    Returns:
+        Tuple of (operation_type, parsed_data) where:
+        - operation_type: One of 'GET', 'POST', 'PUT', 'DELETE'
+        - parsed_data: Dict containing the parsed event data
+
+    Raises:
+        ValueError: If the AppSync event format is invalid
+    """
+    info = event.get("info", {})
+    field_name = info.get("fieldName", "")
+    arguments = event.get("arguments", {})
+
+    # Map AppSync field names to HTTP methods
+    operation_mapping = {
+        "getPart": "GET",
+        "createPart": "POST",
+        "updatePart": "PUT",
+        "deletePart": "DELETE",
+    }
+
+    if field_name not in operation_mapping:
+        raise ValueError(f"Unsupported AppSync operation: {field_name}")
+
+    operation_type = operation_mapping[field_name]
+
+    # Create API Gateway-like event structure
+    parsed_data: Dict[str, Any] = {
+        "httpMethod": operation_type,
+        "pathParameters": {},
+        "body": None,
+        "requestContext": {
+            "requestId": info.get("requestId", "appsync-request"),
+            "appsync": True
+        }
+    }
+
+    # Handle different operations
+    if operation_type == "GET" or operation_type == "DELETE":
+        # For GET/DELETE, UUID should be in arguments
+        part_uuid = arguments.get("uuid") or arguments.get("id")
+        if part_uuid and parsed_data["pathParameters"] is not None:
+            parsed_data["pathParameters"]["uuid"] = str(part_uuid)
+
+    elif operation_type == "POST":
+        # For POST, part data should be in arguments
+        part_data = arguments.get("part") or arguments.get("input")
+        if part_data:
+            parsed_data["body"] = json.dumps({"part": part_data})
+
+    elif operation_type == "PUT":
+        # For PUT, both UUID and part data needed
+        part_uuid = arguments.get("uuid") or arguments.get("id")
+        part_data = arguments.get("part") or arguments.get("input")
+
+        if part_uuid and parsed_data["pathParameters"] is not None:
+            parsed_data["pathParameters"]["uuid"] = str(part_uuid)
+        if part_data:
+            parsed_data["body"] = json.dumps({"part": part_data})
+
+    return operation_type, parsed_data
+
+
+def format_appsync_response(
+    response: Dict[str, Any], operation_type: str
+) -> Dict[str, Any]:
+    """Format response for AppSync GraphQL format.
+
+    Args:
+        response: Standard HTTP response from CRUD operations
+        operation_type: The operation type (GET, POST, PUT, DELETE)
+
+    Returns:
+        Dict formatted for AppSync GraphQL response
+    """
+    status_code = response.get("statusCode", 500)
+
+    try:
+        body = json.loads(response.get("body", "{}"))
+    except json.JSONDecodeError:
+        body = {"error": "Invalid response format"}
+
+    # Handle errors (both HTTP errors and JSON parsing errors)
+    if status_code >= 400 or "error" in body:
+        return {
+            "error": {
+                "message": body.get("error", "Unknown error"),
+                "statusCode": status_code,
+            }
+        }
+
+    # Handle successful responses based on operation type
+    if operation_type == "GET":
+        part_data = body.get("part", {})
+        return dict(part_data) if isinstance(part_data, dict) else {}
+
+    elif operation_type == "POST":
+        part_data = body.get("part", {})
+        return {
+            "uuid": body.get("uuid"),
+            "message": body.get("message"),
+            "part": dict(part_data) if isinstance(part_data, dict) else {}
+        }
+
+    elif operation_type == "PUT":
+        part_data = body.get("part", {})
+        return {
+            "message": body.get("message"),
+            "part": dict(part_data) if isinstance(part_data, dict) else {}
+        }
+
+    elif operation_type == "DELETE":
+        return {"message": body.get("message"), "success": True}
+
+    return dict(body) if isinstance(body, dict) else {}
 
 
 def decimal_default(obj: Any) -> Any:
@@ -149,10 +292,8 @@ def validate_part_data(data: Dict[str, Any], is_update: bool = False) -> Dict[st
                         f"Field {field} must be a number"
                     ) from None
             else:
-                type_name = getattr(expected_type, '__name__', str(expected_type))
-                raise PartValidationError(
-                    f"Field {field} must be of type {type_name}"
-                )
+                type_name = getattr(expected_type, "__name__", str(expected_type))
+                raise PartValidationError(f"Field {field} must be of type {type_name}")
         else:
             cleaned_data[field] = value
 
@@ -168,7 +309,7 @@ def get_part_by_uuid(table: Any, part_uuid: str) -> Optional[Dict[str, Any]]:
     try:
         response = table.query(
             KeyConditionExpression=Key("PK").eq(part_uuid),
-            FilterExpression=Attr("deletedAt").not_exists()
+            FilterExpression=Attr("deletedAt").not_exists(),
         )
 
         items = response.get("Items", [])
@@ -214,11 +355,14 @@ def create_part(event: Dict[str, Any]) -> Dict[str, Any]:
 
         return {
             "statusCode": 201,
-            "body": json.dumps({
-                "message": "Part created successfully",
-                "uuid": part_uuid,
-                "part": item
-            }, default=decimal_default)
+            "body": json.dumps(
+                {
+                    "message": "Part created successfully",
+                    "uuid": part_uuid,
+                    "part": item,
+                },
+                default=decimal_default,
+            ),
         }
 
     except PartValidationError as e:
@@ -263,7 +407,7 @@ def get_part(event: Dict[str, Any]) -> Dict[str, Any]:
 
         return {
             "statusCode": 200,
-            "body": json.dumps({"part": part}, default=decimal_default)
+            "body": json.dumps({"part": part}, default=decimal_default),
         }
 
     except Exception as e:
@@ -317,8 +461,21 @@ def update_part(event: Dict[str, Any]) -> Dict[str, Any]:
 
         # Reserved keywords in DynamoDB
         reserved_keywords = {
-            "segment", "category", "status", "name", "size", "type", "data",
-            "count", "group", "order", "range", "key", "value", "time", "date"
+            "segment",
+            "category",
+            "status",
+            "name",
+            "size",
+            "type",
+            "data",
+            "count",
+            "group",
+            "order",
+            "range",
+            "key",
+            "value",
+            "time",
+            "date",
         }
 
         for field, value in validated_data.items():
@@ -335,7 +492,7 @@ def update_part(event: Dict[str, Any]) -> Dict[str, Any]:
         update_params = {
             "Key": {"PK": part_uuid, "SK": existing_part["SK"]},
             "UpdateExpression": update_expression,
-            "ExpressionAttributeValues": expression_values
+            "ExpressionAttributeValues": expression_values,
         }
 
         if expression_names:
@@ -352,7 +509,7 @@ def update_part(event: Dict[str, Any]) -> Dict[str, Any]:
             "statusCode": 200,
             "body": json.dumps(
                 {"message": "Part updated successfully", "part": updated_part},
-                default=decimal_default
+                default=decimal_default,
             ),
         }
 
@@ -401,7 +558,7 @@ def delete_part(event: Dict[str, Any]) -> Dict[str, Any]:
         table.update_item(
             Key={"PK": part_uuid, "SK": existing_part["SK"]},
             UpdateExpression="SET deletedAt = :deleted_at",
-            ExpressionAttributeValues={":deleted_at": get_current_timestamp()}
+            ExpressionAttributeValues={":deleted_at": get_current_timestamp()},
         )
 
         logger.info(f"Deleted part with UUID: {part_uuid}")
@@ -420,10 +577,43 @@ def delete_part(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Main Lambda handler function."""
+    """Main Lambda handler function supporting API Gateway v2 and AppSync events."""
     try:
         logger.info(f"Received event: {json.dumps(event)}")
 
+        # Check if this is an AppSync event
+        if is_appsync_event(event):
+            try:
+                operation_type, parsed_event = parse_appsync_event(event)
+                logger.info(f"Processing AppSync {operation_type} operation")
+
+                # Route to appropriate function using parsed event
+                if operation_type == "GET":
+                    response = get_part(parsed_event)
+                elif operation_type == "POST":
+                    response = create_part(parsed_event)
+                elif operation_type == "PUT":
+                    response = update_part(parsed_event)
+                elif operation_type == "DELETE":
+                    response = delete_part(parsed_event)
+                else:
+                    return {
+                        "error": {
+                            "message": (
+                                f"Unsupported AppSync operation: {operation_type}"
+                            ),
+                            "statusCode": 405,
+                        }
+                    }
+
+                # Format response for AppSync
+                return format_appsync_response(response, operation_type)
+
+            except ValueError as e:
+                logger.error(f"AppSync event parsing error: {e}")
+                return {"error": {"message": str(e), "statusCode": 400}}
+
+        # Handle API Gateway v2 events (existing logic)
         # Get HTTP method
         http_method = event.get("httpMethod") or event.get("requestContext", {}).get(
             "http", {}
@@ -452,7 +642,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Unexpected error in lambda_handler: {e}")
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": "Internal server error"}),
-        }
+        # Return appropriate error format based on event type
+        if is_appsync_event(event):
+            return {"error": {"message": "Internal server error", "statusCode": 500}}
+        else:
+            return {
+                "statusCode": 500,
+                "body": json.dumps({"error": "Internal server error"}),
+            }
